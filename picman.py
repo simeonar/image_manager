@@ -1,11 +1,12 @@
 import os
 import shutil
 from datetime import datetime
-from typing import List, Tuple
+from typing import List, Tuple, Dict
 from PIL import Image, ExifTags, UnidentifiedImageError
 import tkinter as tk
 from tkinter import filedialog, ttk
 from collections import defaultdict
+
 
 def search_images(directory: str) -> List[str]:
     """
@@ -22,6 +23,7 @@ def search_images(directory: str) -> List[str]:
                 images.append(os.path.join(subdir, file))
     print(f"Total images found: {len(images)}")
     return images
+
 
 def get_image_metadata(image_path: str) -> Tuple[datetime.date, str]:
     """
@@ -48,43 +50,62 @@ def get_image_metadata(image_path: str) -> Tuple[datetime.date, str]:
     except (UnidentifiedImageError, Exception):
         return None, os.path.basename(image_path)
 
-def copy_images_by_date(images: List[str], output_directory: str) -> None:
+
+def copy_images_by_date(images: List[str], output_directory: str, progress_callback: callable,
+                        simple_copy: bool = False) -> None:
     """
     Copy images into folders organized by year, month, and date the image was taken, while preserving the original timestamps.
-    Also handle file name conflicts to avoid overwriting existing files.
+    Also handle file name conflicts by keeping the oldest file and renaming the younger ones.
 
     :param images: List of image file paths.
     :param output_directory: Directory where organized folders will be created.
+    :param progress_callback: Callback function to update progress.
+    :param simple_copy: If True, copies files directly to output directory without date organization.
     """
-    file_metadata = defaultdict(dict)
-    for image_path in images:
+    if simple_copy:
+        total_images = len(images)
+        for i, image_path in enumerate(images):
+            filename = os.path.basename(image_path)
+            destination_path = os.path.join(output_directory, filename)
+
+            # Handle duplicate filenames
+            if os.path.exists(destination_path):
+                name, ext = os.path.splitext(filename)
+                counter = 1
+                while os.path.exists(destination_path):
+                    destination_path = os.path.join(output_directory, f"{name}_{counter}{ext}")
+                    counter += 1
+
+            shutil.copy2(image_path, destination_path)
+            print(f"Copied '{image_path}' to '{destination_path}'")
+            progress_callback(i + 1, total_images)
+        return
+
+    file_metadata: Dict[datetime.date, Dict[str, Tuple[str, int]]] = defaultdict(lambda: defaultdict(lambda: (None, 0)))
+    total_images = len(images)
+    for i, image_path in enumerate(images):
         date_taken, filename = get_image_metadata(image_path)
         if date_taken:
             year = date_taken.year
             month = date_taken.month
             day = date_taken.day
-            file_metadata[year][month][day].append((image_path, filename))
+            existing_filename, creation_order = file_metadata[date_taken][filename]
+            if existing_filename is None or creation_order > 0:
+                file_metadata[date_taken][filename] = (image_path, creation_order + 1)
+        progress_callback(i + 1, total_images)
 
-    for year, month_data in file_metadata.items():
-        year_folder = os.path.join(output_directory, str(year))
-        os.makedirs(year_folder, exist_ok=True)
-        for month, day_data in month_data.items():
-            month_folder = os.path.join(year_folder, f"{month:02d}")
-            os.makedirs(month_folder, exist_ok=True)
-            for day, files in day_data.items():
-                day_folder = os.path.join(month_folder, f"{day:02d}")
-                os.makedirs(day_folder, exist_ok=True)
-                for source_path, filename in files:
-                    destination_path = os.path.join(day_folder, filename)
-                    if os.path.exists(destination_path):
-                        # Handle file name conflicts
-                        name, ext = os.path.splitext(filename)
-                        i = 1
-                        while os.path.exists(os.path.join(day_folder, f"{name}_{i}{ext}")):
-                            i += 1
-                        destination_path = os.path.join(day_folder, f"{name}_{i}{ext}")
-                    shutil.copy2(source_path, destination_path)
-                    print(f"Copied '{source_path}' to '{destination_path}'")
+    for date, file_data in file_metadata.items():
+        date_folder = os.path.join(output_directory, str(date.year), f"{date.month:02d}", f"{date.day:02d}")
+        os.makedirs(date_folder, exist_ok=True)
+        for filename, (source_path, creation_order) in file_data.items():
+            if creation_order > 1:
+                name, ext = os.path.splitext(filename)
+                destination_path = os.path.join(date_folder, f"copy_{name}{ext}")
+            else:
+                destination_path = os.path.join(date_folder, filename)
+            shutil.copy2(source_path, destination_path)
+            print(f"Copied '{source_path}' to '{destination_path}'")
+
 
 class ImageOrganizerGUI(tk.Tk):
     def __init__(self):
@@ -94,6 +115,10 @@ class ImageOrganizerGUI(tk.Tk):
 
         self.input_directory = tk.StringVar()
         self.output_directory = tk.StringVar()
+        self.simple_copy = tk.BooleanVar()
+
+        self.progress_var = tk.IntVar()
+        self.progress_label = None
 
         self.create_widgets()
 
@@ -112,9 +137,17 @@ class ImageOrganizerGUI(tk.Tk):
         tk.Entry(output_frame, textvariable=self.output_directory, width=40).pack(side=tk.LEFT)
         tk.Button(output_frame, text="Browse", command=self.select_output_directory).pack(side=tk.LEFT)
 
+        # Simple copy checkbox
+        checkbox_frame = tk.Frame(self)
+        checkbox_frame.pack(pady=5)
+        tk.Checkbutton(checkbox_frame, text="Simple copy (no date folders)", variable=self.simple_copy).pack()
+
         # Progress bar
-        self.progress_bar = ttk.Progressbar(self, mode='determinate')
+        self.progress_bar = ttk.Progressbar(self, mode='determinate', variable=self.progress_var)
         self.progress_bar.pack(pady=10, fill=tk.X)
+
+        self.progress_label = tk.Label(self, text="")
+        self.progress_label.pack(pady=5)
 
         # Buttons
         button_frame = tk.Frame(self)
@@ -132,6 +165,10 @@ class ImageOrganizerGUI(tk.Tk):
         if directory:
             self.output_directory.set(directory)
 
+    def update_progress(self, current, total):
+        self.progress_var.set(current)
+        self.progress_label.config(text=f"Processing {current} of {total} images...")
+
     def organize_images(self):
         input_dir = self.input_directory.get()
         output_dir = self.output_directory.get()
@@ -142,12 +179,13 @@ class ImageOrganizerGUI(tk.Tk):
 
         images = search_images(input_dir)
         self.progress_bar["maximum"] = len(images)
-        self.progress_bar["value"] = 0
 
-        copy_images_by_date(images, output_dir)
+        copy_images_by_date(images, output_dir, self.update_progress, self.simple_copy.get())
 
         self.progress_bar["value"] = len(images)
+        self.progress_label.config(text="Image organization completed.")
         tk.messagebox.showinfo("Completed", "Image organization completed.")
+
 
 if __name__ == '__main__':
     app = ImageOrganizerGUI()
