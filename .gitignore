@@ -1,3 +1,4 @@
 .env
 .gitignore
+.idea/
 image_organizer*
